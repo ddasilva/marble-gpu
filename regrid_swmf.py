@@ -86,7 +86,7 @@ def do_regrid(xbats, ybats, zbats, bx, by, bz, Ex, Ey, Ez, n, T, args):
 
     # Get grid
     xaxis, yaxis, zaxis = get_new_grid(args)
-    X, Y, Z = np.meshgrid(xaxis, yaxis, zaxis)
+    X, Y, Z = np.meshgrid(xaxis, yaxis, zaxis, indexing='ij')
 
     # Make Polydata object
     point_cloud = pv.PolyData(np.transpose([xbats, ybats, zbats]))
@@ -146,9 +146,9 @@ def write_regrid_data(args, regrid_data):
 
 def get_new_grid(args):
     """Definds the new grid to regrid to."""
-    xaxis = np.arange(-3, 15, args.grid_spacing)
+    xaxis = np.arange(-15, 15, args.grid_spacing)
     yaxis = np.arange(-15, 15, args.grid_spacing)
-    zaxis = np.arange(-5, 5, args.grid_spacing)
+    zaxis = np.arange(-15, 15, args.grid_spacing)
 
     return xaxis, yaxis, zaxis
     

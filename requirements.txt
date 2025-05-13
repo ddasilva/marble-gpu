@@ -2,3 +2,4 @@ h5py>=2.2.5
 jupyterlab>=4.4.2
 pyvista>=0.45.2
 spacepy>=1.17.0
+ai.cs==1.0.7
