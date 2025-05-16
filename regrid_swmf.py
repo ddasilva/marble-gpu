@@ -1,5 +1,6 @@
 import argparse
 import time
+from datetime import timedelta
 
 from astropy import units as u
 import h5py
@@ -10,6 +11,7 @@ from scipy.constants import m_p
 import vtk
 
 EARTH_DIPOLE_B0 = -31_000 * u.nT
+R_INNER = 2.5
 
 
 def main():
@@ -81,11 +83,11 @@ def main():
     
 
 def do_regrid(xbats, ybats, zbats, bx, by, bz, Ex, Ey, Ez, n, T, args):
-    """Do regridding o unstructured grid to structured grid."""
+    """Do regridding on unstructured grid to uniform grid."""
     print('Regridding')
 
     # Get grid
-    xaxis, yaxis, zaxis = get_new_grid(args)
+    xaxis, yaxis, zaxis, taxis = get_new_grid(args)
     X, Y, Z = np.meshgrid(xaxis, yaxis, zaxis, indexing='ij')
 
     # Make Polydata object
@@ -112,12 +114,34 @@ def do_regrid(xbats, ybats, zbats, bx, by, bz, Ex, Ey, Ez, n, T, args):
     regrid_data = {}
 
     for var in ['Bx', 'By', 'Bz', 'Ex', 'Ey', 'Ez', 'n', 'T']:
-        regrid_data[var] = interp_result[var].reshape(X.shape)
+        data = interp_result[var].reshape(X.shape)
+        data = np.array([data.T]*taxis.size).T
+        regrid_data[var] = data
         
     regrid_data['xaxis'] = xaxis
     regrid_data['yaxis'] = yaxis
     regrid_data['zaxis'] = zaxis
+    regrid_data['taxis'] = taxis
+    regrid_data['r_inner'] = R_INNER
     
+    # VTK will put zeros for interpolated values outside the pointcloud.
+    # Our interface wants there to be NaN
+    m = (
+        (regrid_data['Bx']==0) &
+        (regrid_data['By']==0) &
+        (regrid_data['Bz']==0) &
+        (regrid_data['Ex']==0) &
+        (regrid_data['Ey']==0) &
+        (regrid_data['Ez']==0) &
+        (regrid_data['n']==0) &
+        (regrid_data['T']==0) 
+    )
+    print('Cells to NaN:', m.sum() / m.size)
+
+    for var in regrid_data.keys():
+        if not var.endswith('axis') and var != 'r_inner':
+            regrid_data[var][m] = np.nan
+            
     return regrid_data
 
 
@@ -150,7 +174,10 @@ def get_new_grid(args):
     yaxis = np.arange(-15, 15, args.grid_spacing)
     zaxis = np.arange(-15, 15, args.grid_spacing)
 
-    return xaxis, yaxis, zaxis
+    time_window = timedelta(days=5).total_seconds()
+    taxis = np.array([-time_window, time_window])
+    
+    return xaxis, yaxis, zaxis, taxis
     
     
 def subtract_dipole(bx, by, bz, xbats, ybats, zbats):
