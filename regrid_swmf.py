@@ -3,15 +3,21 @@ import time
 from datetime import timedelta
 
 from astropy import units as u
+from cupyx.scipy.spatial import KDTree
+import pandas as pd
 import h5py
 import numpy as np
 import pyvista as pv
 from spacepy.pybats import bats
 from scipy.constants import m_p
 import vtk
+from cupyx.scipy.spatial import KDTree
+import cupy as cp
+from tqdm import tqdm
 
 EARTH_DIPOLE_B0 = -31_000 * u.nT
 R_INNER = 2.5
+MAX_NEIGHBOR_DISTANCE = 25
 
 
 def main():
@@ -78,17 +84,75 @@ def main():
 
     # Write output
     write_regrid_data(args, regrid_data)
-    
-    print('took', time.time() - start_time, 's')
-    
 
+    
 def do_regrid(xbats, ybats, zbats, bx, by, bz, Ex, Ey, Ez, n, T, args):
     """Do regridding on unstructured grid to uniform grid."""
     print('Regridding')
+    xaxis, yaxis, zaxis, taxis, radii = get_new_grid(xbats, ybats, zbats, args)
+    X, Y, Z = np.meshgrid(xaxis, yaxis, zaxis, indexing='ij')
+
+    print('Building KDTree')
+    tree = KDTree(cp.array([xbats.value, ybats.value, zbats.value]).T)
+    print('Done')
+
+    print("Querying")
+    query_points = cp.array([X.flatten(), Y.flatten(), Z.flatten()]).T
+    k = 16
+    d, I = tree.query(query_points, k=k)
+    print('Done')
+
+    print('Interpolating')
+    vars = ['Bx', 'By', 'Bz', 'Ex', 'Ey', 'Ez', 'n', 'T']
+    target_shape = X.shape + (2,)
+    regrid_data = {}
+    for var in vars:
+        regrid_data[var] = np.zeros(target_shape)
+        
+    scale = d.std(axis=1)
+    scale_ = cp.zeros((scale.size, k))
+    for i in range(k):
+        scale_[:, i] = scale
+        
+    weights = np.exp(-(d/scale_)**2)
+    norm = weights.sum(axis=1)
+    
+    for i in range(k):
+        weights[:, i] /= norm
+
+    regrid_data['Bx'][:, :, :, 0] = cp.sum(cp.array(bx)[I] * weights, axis=1).get().reshape(X.shape)
+    regrid_data['By'][:, :, :, 0] = cp.sum(cp.array(by)[I] * weights, axis=1).get().reshape(X.shape)
+    regrid_data['Bz'][:, :, :, 0] = cp.sum(cp.array(bz)[I] * weights, axis=1).get().reshape(X.shape)
+    regrid_data['Ex'][:, :, :, 0] = cp.sum(cp.array(Ex)[I] * weights, axis=1).get().reshape(X.shape)
+    regrid_data['Ey'][:, :, :, 0] = cp.sum(cp.array(Ey)[I] * weights, axis=1).get().reshape(X.shape)
+    regrid_data['Ez'][:, :, :, 0] = cp.sum(cp.array(Ez)[I] * weights, axis=1).get().reshape(X.shape)
+    regrid_data['n'][:, :, :, 0] = cp.sum(cp.array(n)[I] * weights, axis=1).get().reshape(X.shape)
+    regrid_data['T'][:, :, :, 0] = cp.sum(cp.array(T)[I] * weights, axis=1).get().reshape(X.shape)
+    
+    for var in vars:
+        regrid_data[var][:, :, :, 1] = regrid_data[var][:, :, :, 0]
+
+    # for var in vars:
+    #     mask = (d.min(axis=1) > MAX_NEIGHBOR_DISTANCE).reshape(X.shape).get()
+    #     regrid_data[var][mask] = np.nan
+        
+    print('Done')
+    
+    regrid_data['xaxis'] = xaxis
+    regrid_data['yaxis'] = yaxis
+    regrid_data['zaxis'] = zaxis
+    regrid_data['taxis'] = taxis
+    regrid_data['r_inner'] = R_INNER
+    
+    return regrid_data
+    
+
 
     # Get grid
-    xaxis, yaxis, zaxis, taxis = get_new_grid(args)
+    xaxis, yaxis, zaxis, taxis, radii = get_new_grid(xbats, ybats, zbats, args)
     X, Y, Z = np.meshgrid(xaxis, yaxis, zaxis, indexing='ij')
+
+    print('Data shape will be', X.shape)
 
     # Make Polydata object
     point_cloud = pv.PolyData(np.transpose([xbats, ybats, zbats]))
@@ -101,23 +165,31 @@ def do_regrid(xbats, ybats, zbats, bx, by, bz, Ex, Ey, Ez, n, T, args):
     point_cloud['n'] = n.flatten(order='F')
     point_cloud['T'] = T.flatten(order='F')
 
-    points_search = pv.PolyData(np.transpose([X.flatten(), Y.flatten(), Z.flatten()]))
-    interp = vtk.vtkPointInterpolator()  
-    interp.SetInputData(points_search)
-    interp.SetSourceData(point_cloud)
-    interp.GetKernel().SetRadius(args.interp_radius)
-    interp.Update()
-
-    interp_result = pv.PolyData(interp.GetOutput())
-
-    # Pull out of Polydata object
+    vars = ['Bx', 'By', 'Bz', 'Ex', 'Ey', 'Ez', 'n', 'T']
     regrid_data = {}
+    
+    for var in vars:
+        regrid_data[var] = np.zeros(X.shape)
+    
+    interp = vtk.vtkPointInterpolator()  
+    interp.SetSourceData(point_cloud)
+    
+    for i, interp_radius in tqdm(list(enumerate(radii))): 
+        points_search = pv.PolyData(np.transpose([X[i].flatten(), Y[i].flatten(), Z[i].flatten()]))
+        interp.SetInputData(points_search)
 
-    for var in ['Bx', 'By', 'Bz', 'Ex', 'Ey', 'Ez', 'n', 'T']:
-        data = interp_result[var].reshape(X.shape)
-        data = np.array([data.T]*taxis.size).T
-        regrid_data[var] = data
-        
+        interp.GetKernel().SetRadius(interp_radius)
+        interp.Update()
+
+        interp_result = pv.PolyData(interp.GetOutput())
+
+        for var in vars:
+            data = interp_result[var].reshape(X.shape[1:])
+            regrid_data[var][i] = data
+
+    for var in vars:
+        regrid_data[var] = np.array([regrid_data[var].T]*taxis.size).T        
+            
     regrid_data['xaxis'] = xaxis
     regrid_data['yaxis'] = yaxis
     regrid_data['zaxis'] = zaxis
@@ -168,16 +240,48 @@ def write_regrid_data(args, regrid_data):
     hdf_file.close()
     
 
-def get_new_grid(args):
+def get_new_grid(xbats, ybats, zbats, args):
     """Definds the new grid to regrid to."""
-    xaxis = np.arange(-15, 15, args.grid_spacing)
-    yaxis = np.arange(-15, 15, args.grid_spacing)
-    zaxis = np.arange(-15, 15, args.grid_spacing)
+    # xaxis = np.arange(-15, 15, args.grid_spacing)
+    # yaxis = np.arange(-15, 15, args.grid_spacing)
+    # zaxis = np.arange(-15, 15, args.grid_spacing)
 
+    # Too much
+    #xaxis = np.arange(xbats.min().value, xbats.max().value, args.grid_spacing)
+    #yaxis = np.arange(ybats.min().value, ybats.max().value, args.grid_spacing)
+    #zaxis = np.arange(zbats.min().value, zbats.max().value, args.grid_spacing)    
+
+    # Use OpenGGCM Grid
+    dfs = {}
+
+    for dim in 'xyz':
+        dfs[dim] = pd.read_csv(
+            f'data/OpenGGCM_grids/overwiew_7M_now_11.8Mcells/grid{dim}.txt',
+            sep='\\s+',
+            names=[dim, 'delta', 'unused2'],
+            skiprows=1
+        )
+
+    xaxis = -dfs['x'].x[::-1]
+    yaxis = dfs['y'].y
+    zaxis = dfs['z'].z
     time_window = timedelta(days=5).total_seconds()
     taxis = np.array([-time_window, time_window])
     
-    return xaxis, yaxis, zaxis, taxis
+    radii = 2.5 * np.sqrt(dfs['x'].delta**2 +
+                          dfs['y'].delta**2 +
+                          dfs['z'].delta**2)
+
+    print('batsx', xbats.min(), xbats.max())
+    print('ggscmx', xaxis.min(), xaxis.max())
+
+    m = (xaxis > xbats.min()) & (xaxis < xbats.max())
+    radii = radii[m]
+    xaxis = xaxis[m]
+    yaxis = yaxis[(yaxis > ybats.min()) & (yaxis < ybats.max())]
+    zaxis = zaxis[(zaxis > zbats.min()) & (zaxis < zbats.max())]
+    
+    return xaxis, yaxis, zaxis, taxis, radii
     
     
 def subtract_dipole(bx, by, bz, xbats, ybats, zbats):
