@@ -109,11 +109,12 @@ def do_regrid(xbats, ybats, zbats, bx, by, bz, Ex, Ey, Ez, n, T, args):
     for var in vars:
         regrid_data[var] = np.zeros(target_shape)
         
-    scale = d.std(axis=1)
+    scale = d.mean(axis=1)
     scale_ = cp.zeros((scale.size, k))
     for i in range(k):
         scale_[:, i] = scale
-        
+
+    # Use Gaussian RBFs with scale apprximated by average neighbor distances
     weights = np.exp(-(d/scale_)**2)
     norm = weights.sum(axis=1)
     
@@ -128,7 +129,7 @@ def do_regrid(xbats, ybats, zbats, bx, by, bz, Ex, Ey, Ez, n, T, args):
     regrid_data['Ez'][:, :, :, 0] = cp.sum(cp.array(Ez)[I] * weights, axis=1).get().reshape(X.shape)
     regrid_data['n'][:, :, :, 0] = cp.sum(cp.array(n)[I] * weights, axis=1).get().reshape(X.shape)
     regrid_data['T'][:, :, :, 0] = cp.sum(cp.array(T)[I] * weights, axis=1).get().reshape(X.shape)
-    
+
     for var in vars:
         regrid_data[var][:, :, :, 1] = regrid_data[var][:, :, :, 0]
 
