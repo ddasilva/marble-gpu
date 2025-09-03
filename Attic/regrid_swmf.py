@@ -38,6 +38,9 @@ def main():
     print('Found variables:')
     print(mhd.keys())
 
+    import pdb
+    pdb.set_trace()
+
     # Load coordinates
     print('Loading data')
     xbats = mhd['x'] * u.R_earth
